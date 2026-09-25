@@ -1,15 +1,27 @@
-from faster_whisper import WhisperModel
+"""whisper-local: local faster-whisper exposed as an OpenAI-compatible HTTP API.
 
-model = WhisperModel(
-    "kotoba-tech/kotoba-whisper-v2.0-faster",
-    device="cuda",
-    compute_type="float16",
-)
+Importing this package has no side effects (no model loading, no inference).
 
-segments, info = model.transcribe(
-    "/home/shogo/projects/tomody/d-sha/wavs_ja/01_disp_hmi_scene.wav",
-    language="ja",
-)
+Public API:
 
-for segment in segments:
-    print(segment.text)
+* :func:`main` -- start the HTTP server (entry point of the ``whisper-local`` script)
+* ``__version__``
+"""
+
+from __future__ import annotations
+
+__all__ = ["__version__", "main"]
+
+try:  # pragma: no cover - metadata is always present for an installed package
+    from importlib.metadata import version as _version
+
+    __version__ = _version("whisper-local")
+except Exception:  # pragma: no cover
+    __version__ = "0.0.0"
+
+
+def main() -> None:
+    """Start the OpenAI-compatible HTTP server."""
+    from whisper_local.server.main import main as _main
+
+    _main()

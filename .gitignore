@@ -9,4 +9,7 @@ wheels/
 # Virtual environments
 .venv
 
+# Runtime data (corrected model directories, temp files)
+/var
+
 /thoughts
