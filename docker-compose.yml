@@ -1,0 +1,36 @@
+services:
+  whisper-local:
+    image: ghcr.io/astral-sh/uv:python3.13-trixie
+    command: >-
+      uv run python -m server
+    environment:
+      HOME: "${HOME}"
+      UV_CACHE_DIR: "${HOME}/projects/.cache/uv"
+      UV_PYTHON_INSTALL_DIR: "${HOME}/projects/.cache/python"
+      PYTHONUNBUFFERED: "1"
+      DEBUG: "True"
+      # WHISPER_MODEL: large-v3-turbo
+      WHISPER_HOST: "0.0.0.0"
+    working_dir: ${PWD}
+    volumes:
+      - ${ROOT:-${PWD}}:${ROOT:-${PWD}}
+      - ${HF_CACHE}:${HF_CACHE}
+      - /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/
+    stop_grace_period: 1s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/-/healthcheck/"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      dormant.enable: "true"
+      dormant.host: "whisper-local.${HOST}.localhost"
+      dormant.port: "8000"
+    networks:
+      global:
+    gpus: all
+networks:
+  global:
+    name: global
+    external: true
