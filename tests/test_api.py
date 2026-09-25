@@ -242,6 +242,32 @@ def test_healthz_endpoint():
     assert body["words_available"] is True
 
 
+def test_healthcheck_endpoint_with_trailing_slash():
+    client, _ = make_client()
+    with client:
+        res = client.get("/-/healthcheck/")
+    assert res.status_code == 200
+    assert res.json() == {"status": "ok"}
+
+
+def test_healthcheck_endpoint_without_trailing_slash_is_not_a_redirect():
+    client, _ = make_client()
+    with client:
+        res = client.get("/-/healthcheck", follow_redirects=False)
+    assert res.status_code == 200
+    assert res.json() == {"status": "ok"}
+
+
+def test_healthcheck_endpoint_skips_auth_when_api_key_set():
+    client, _ = make_client(api_key="secret")
+    with client:
+        with_slash = client.get("/-/healthcheck/")
+        without_slash = client.get("/-/healthcheck")
+    assert with_slash.status_code == 200
+    assert with_slash.json() == {"status": "ok"}
+    assert without_slash.status_code == 200
+
+
 def test_root_endpoint():
     client, _ = make_client()
     with client:

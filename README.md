@@ -70,6 +70,7 @@ WHISPER_API_KEY=secret WHISPER_PORT=9000 WHISPER_MAX_UPLOAD_MB=50 uv run python 
 | POST | `/v1/audio/translations` | 英語への翻訳（`task=translate`） |
 | GET | `/v1/models` | OpenAI クライアントの疎通確認用モデル一覧 |
 | GET | `/healthz` | 死活監視（モデルロード状態・device・words 可用性） |
+| GET | `/-/healthcheck/` | 起動待ちヘルスチェック（認証不要・常に `{"status":"ok"}`。スラッシュなしも 200） |
 | GET | `/` | 簡易情報（バージョン・対応エンドポイント） |
 
 ### パラメータ（transcriptions / translations）

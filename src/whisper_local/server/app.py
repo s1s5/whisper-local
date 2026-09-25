@@ -343,6 +343,14 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
     async def list_models() -> ModelList:
         return ModelList(data=[ModelCard(id=settings.model)])
 
+    @app.get("/-/healthcheck/")
+    @app.get("/-/healthcheck")
+    async def healthcheck() -> dict:
+        # Unauthenticated on purpose: the startup probe must succeed while the
+        # model is still loading and even when WHISPER_API_KEY is set.
+        # Both spellings are registered so no 307 redirect is involved.
+        return {"status": "ok"}
+
     @app.get("/healthz")
     async def healthz() -> HealthResponse:
         return HealthResponse(
