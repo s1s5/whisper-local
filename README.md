@@ -3,6 +3,7 @@
 ローカルの [faster-whisper](https://github.com/SYSTRAN/faster-whisper) を **OpenAI Audio API 互換**の HTTP サーバとして公開する。
 
 - 既定モデル: `kotoba-tech/kotoba-whisper-v2.0-faster`（日本語特化）
+- `WHISPER_MODEL` の切り替えだけで他の faster-whisper モデル（例: `large-v3-turbo`）も使える
 - OpenAI SDK から `base_url=http://127.0.0.1:8000/v1` でそのまま呼べる
 - GPU は自動検出。使えなければ警告ログを出して CPU にフォールバック
 - word timestamps（`timestamp_granularities[]=word`）に対応
@@ -17,6 +18,29 @@ uv run python -m server
 `whisper-local` コンソールスクリプトも同じサーバを起動する（`uv run whisper-local`）。
 
 モデルは起動時に1回だけロードされる（初回は数秒）。`GET /healthz` が `model_loaded: true` を返したら準備完了。
+
+## モデルの切り替え
+
+使用モデルは `WHISPER_MODEL` で指定する（既定は kotoba）。同時に複数モデルは扱わず、**env を変えて起動し直す**方式。
+
+```bash
+# 日本語特化（既定）
+uv run python -m server
+
+# 多言語・汎用の turbo
+WHISPER_MODEL=large-v3-turbo uv run python -m server
+```
+
+`large-v3-turbo` は faster-whisper の組み込みエイリアス（実体 `mobiuslabsgmbh/faster-whisper-large-v3-turbo`）。初回は HF から取得が必要（`local_files_only` で読むため、事前取得しておくこと）。
+
+| model | 実測速度 (CPU int8) | ピーク RSS | words | 備考 |
+|---|---|---|---|---|
+| `kotoba-tech/kotoba-whisper-v2.0-faster`（既定） | 約 1.8x realtime | 約 1.7 GB | 可（補正あり） | 日本語特化 |
+| `large-v3-turbo` | 約 1.9x realtime（`cpu_threads=8` で 1.7x） | 約 1.7 GB | 可（**補正不要**） | 多言語・汎用 |
+
+- 速度は「音声1秒あたりの処理秒（RTF）」。数値は 3.29s の日本語音声での実測。
+- turbo は `alignment_heads`（最大層3）が実デコーダ4層に収まるため、**補正は自動でスキップされる**（起動ログに `no correction needed` と出る）。
+- `large-v3-turbo` は `cpu_threads=8` を付けるとわずかに速い（`WHISPER_CPU_THREADS=8`）。
 
 ## 環境変数
 
