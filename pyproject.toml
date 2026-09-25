@@ -1,0 +1,19 @@
+[project]
+name = "whisper-local"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Shogo Sawai", email = "shogo.sawai@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "faster-whisper>=1.2.1",
+]
+
+[project.scripts]
+whisper-local = "whisper_local:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
