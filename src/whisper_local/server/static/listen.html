@@ -261,21 +261,37 @@ function renderTranscript() {
 
 // -- healthz ---------------------------------------------------------------
 
-async function loadServerInfo() {
+// Some deployments sit behind a host-routing proxy that intercepts /healthz and
+// answers with a non-JSON body (e.g. a bare "ok"). Read every response as text
+// and parse defensively, then fall back to "/" (also JSON) before giving up.
+async function tryFetchJson(path) {
   try {
-    const res = await fetch("/healthz");
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const info = await res.json();
-    const parts = [
-      '<span class="badge">model: ' + escapeHtml(info.model || "?") + "</span>",
-      '<span class="badge">device: ' + escapeHtml(info.device || "?") + "</span>",
-      '<span class="badge">model_loaded: ' + escapeHtml(info.model_loaded ? "loaded" : "loading…") + "</span>",
-    ];
-    if (info.words_available === false) parts.push("word timestamps 無効");
-    metaEl.innerHTML = parts.join(" ");
+    const res = await fetch(path);
+    if (!res.ok) return null;
+    const text = await res.text();
+    if (!text) return null;
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? parsed : null;
   } catch (err) {
-    metaEl.textContent = "サーバ情報を取得できませんでした（" + err.message + "）";
+    return null;
   }
+}
+
+async function fetchServerInfo() {
+  return (await tryFetchJson("/healthz")) || (await tryFetchJson("/"));
+}
+
+async function loadServerInfo() {
+  const info = await fetchServerInfo();
+  if (!info) {
+    metaEl.textContent = "サーバ情報を取得できませんでした";
+    return;
+  }
+  const parts = ['<span class="badge">model: ' + escapeHtml(info.model || "?") + "</span>"];
+  if (info.device) parts.push('<span class="badge">device: ' + escapeHtml(info.device) + "</span>");
+  parts.push('<span class="badge">model_loaded: ' + escapeHtml(info.model_loaded ? "loaded" : "loading…") + "</span>");
+  if (info.words_available === false) parts.push("word timestamps 無効");
+  metaEl.innerHTML = parts.join(" ");
 }
 
 function escapeHtml(value) {
