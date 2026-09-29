@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, AsyncIterator, Iterable, Optional
 
-from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 
 from whisper_local import __version__, schemas
 from whisper_local.config import Settings
+from whisper_local.server.listen import handle_listen
 from whisper_local.server.openai_types import (
     RESPONSE_FORMATS,
     HealthResponse,
@@ -471,6 +472,11 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
             task="translate",
         )
 
+    @app.websocket("/v1/listen")
+    async def listen(websocket: WebSocket) -> None:
+        # Deepgram compatible realtime transcription (plan section 2).
+        await handle_listen(websocket, manager, settings)
+
     @app.get("/v1/models", dependencies=[Depends(require_auth)])
     async def list_models() -> ModelList:
         return ModelList(data=[ModelCard(id=settings.model)])
@@ -515,9 +521,11 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
             "endpoints": [
                 "POST /v1/audio/transcriptions",
                 "POST /v1/audio/translations",
+                "WS /v1/listen",
                 "GET /v1/models",
                 "GET /healthz",
                 "GET /ui",
+                "GET /ui/listen",
             ],
             "ui": "/ui",
         }
@@ -532,6 +540,13 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
             # Registered before the mount so ``GET /ui`` is 200 instead of
             # Starlette's 307 redirect to ``/ui/``.
             return FileResponse(index, media_type="text/html; charset=utf-8")
+
+        listen_page = STATIC_DIR / "listen.html"
+        if listen_page.is_file():
+
+            @app.get("/ui/listen", include_in_schema=False)
+            async def ui_listen() -> Response:
+                return FileResponse(listen_page, media_type="text/html; charset=utf-8")
 
         app.mount("/ui", StaticFiles(directory=str(STATIC_DIR), html=True), name="ui")
 

@@ -28,6 +28,10 @@ def repo_root() -> Path:
 DEFAULT_SAVE_AUDIO = True
 DEFAULT_SAVE_AUDIO_DIR = repo_root() / "var" / "recordings"
 
+# Interim ``Results`` interval for ``WS /v1/listen`` (plan section 4.2). CPU
+# inference is slower than realtime, so interims are emitted sparingly.
+DEFAULT_LISTEN_INTERIM_INTERVAL_MS = 1500
+
 
 def _int(value: str | None, default: int, name: str) -> int:
     if value is None or value.strip() == "":
@@ -75,6 +79,7 @@ class Settings:
     models_root: Path = Path("var/models")
     save_audio: bool = DEFAULT_SAVE_AUDIO
     save_audio_dir: Path = DEFAULT_SAVE_AUDIO_DIR
+    listen_interim_interval_ms: int = DEFAULT_LISTEN_INTERIM_INTERVAL_MS
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -104,4 +109,9 @@ class Settings:
                 env.get("WHISPER_SAVE_AUDIO"), DEFAULT_SAVE_AUDIO, "WHISPER_SAVE_AUDIO"
             ),
             save_audio_dir=Path(raw_save_dir) if raw_save_dir else DEFAULT_SAVE_AUDIO_DIR,
+            listen_interim_interval_ms=_int(
+                env.get("WHISPER_LISTEN_INTERIM_INTERVAL_MS"),
+                DEFAULT_LISTEN_INTERIM_INTERVAL_MS,
+                "WHISPER_LISTEN_INTERIM_INTERVAL_MS",
+            ),
         )

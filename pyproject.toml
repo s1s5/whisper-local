@@ -12,6 +12,7 @@ dependencies = [
     "faster-whisper>=1.2.1",
     "python-multipart>=0.0.32",
     "uvicorn>=0.54.0",
+    "websockets>=13",
 ]
 
 [project.scripts]

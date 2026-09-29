@@ -81,6 +81,94 @@ var/recordings/<YYYY-MM-DD>/<HHMMSS>-<6桁乱数>.json         # verbose_json �
 | `WHISPER_SAVE_AUDIO` | `true` | `false` で保存を無効化 |
 | `WHISPER_SAVE_AUDIO_DIR` | `<repo>/var/recordings` | 保存先ディレクトリ（絶対パス可） |
 
+## ストリーミング文字起こし（Deepgram 互換 `WS /v1/listen`）
+
+Deepgram の [Live Audio API](https://developers.deepgram.com/reference/speech-to-text/listen-streaming)（`wss://api.deepgram.com/v1/listen`）互換の WebSocket を同じプロセスで提供する。
+エンジンは既存の faster-whisper（`kotoba` 既定）を再利用し、**生バイナリ PCM（`encoding=linear16`）を受信 → 16 kHz mono float32 へ変換 → バッファ + 簡易エンドポインティングで interim / final を擬似ストリーム**する。
+
+```bash
+uv run python -m server
+# ブラウザで http://127.0.0.1:8000/ui/listen を開く
+# または CLI から:
+uv run python scripts/deepgram_client.py /path/to/audio.wav --language ja --finalize
+```
+
+### 接続
+
+- エンドポイント: `ws://<host>:<port>/v1/listen`（本PoCは自前ホスト）
+- 認証（`WHISPER_API_KEY` 設定時のみ検証。3経路のいずれか）:
+  - ヘッダ `Authorization: Token <KEY>`（`Bearer <KEY>` も可）
+  - クエリ `?api_key=<KEY>`
+  - `Sec-WebSocket-Protocol: token, <KEY>`（ブラウザ等カスタムヘッダ不可の環境向け。受理時はサブプロトコル `token` を返す）
+  - 失敗時は upgrade を拒否して **HTTP 401**（`{"err_code":"INVALID_AUTH","err_msg":"Invalid credentials.","request_id":...}`）
+- SDK が付与する `x-deepgram-session-id` 等の追加ヘッダは受理して無視する
+
+### クエリパラメータ
+
+| param | 既定 | 挙動 |
+|---|---|---|
+| `model` | — | 受理（ログ用。実体は起動時の faster-whisper に固定） |
+| `language` | `ja` | 受理（ISO-639-1） |
+| `encoding` | `linear16` | **`linear16` のみ実装**。他は `Error` |
+| `sample_rate` | `16000` | 受理（linear16 のレート。16k 以外は numpy でリサンプル） |
+| `channels` | `1` | `1` のみ。`>1` は `Error` |
+| `interim_results` | `false` | `true` で interim `Results`（`is_final=false`）を送出 |
+| `endpointing` | `500`(PoC内部既定) | final 判定の無音長（ms）。`false`/`0` で無効 |
+| `utterance_end_ms` | 無効 | 指定で `UtteranceEnd` を送出 |
+| `vad_events` | `false` | `true` で `SpeechStarted` を送出 |
+| `punctuate` / `smart_format` / `version` | — | 受理（`version` は無視、他はモデル出力依存で素通し） |
+| その他（`diarize` / `keywords` / `keyterm` / `redact` 等） | — | 受理して無視 |
+
+> Deepgram の `endpointing` 既定は `10`(ms) だが、faster-whisper は VAD を持たないバッチ推論のため、極端に短い値は誤検知になる。クエリ未指定時の PoC 内部既定は **500 ms**（§4.5）。
+
+### クライアント → サーバ
+
+| message | 形式 | 挙動 |
+|---|---|---|
+| 音声 | **生バイナリフレーム**（base64 ではない） | バッファに蓄積 |
+| `{"type":"Finalize"}` | JSON | 現バッファを final 化（`from_finalize=true`） |
+| `{"type":"CloseStream"}` | JSON | final 化 → `Metadata` → `close(1000)` |
+| `{"type":"KeepAlive"}` | JSON | 受理（無音バッファには積まない） |
+
+### サーバ → クライアント
+
+| message | 主なフィールド | タイミング |
+|---|---|---|
+| `Results` | `type, channel_index, duration, start, is_final, speech_final, from_finalize, channel.alternatives[].{transcript,confidence,words[]}, metadata` | interim / final のたび |
+| `Metadata` | `type, transaction_key, request_id, sha256, created, duration, channels` | `CloseStream` の final 後 |
+| `UtteranceEnd` | `type, channel, last_word_end` | `utterance_end_ms` 経過時 |
+| `SpeechStarted` | `type, channel, timestamp` | 発話開始時（`vad_events=true`） |
+| `Error` | `type, err_code, err_msg, request_id` | 不正クエリ / 復号不能フレーム等 |
+
+- `is_final=false` = interim（更新されうる） / `is_final=true` = 確定 / `speech_final=true` = 発話の切れ目（エンドポインティング確定） / `from_finalize=true` = `Finalize`/`CloseStream` 起因。
+- **無音のみの final は送出しない**（ハルシネーション回避）。
+- `words[]` は word timestamps 有効時（`/healthz` の `words_available`）のみ埋まる。無効なら `transcript`/`confidence` のみ。
+- `confidence` は words があれば word 確率の平均、無ければ segment の `avg_logprob` から `exp()` で算出。
+
+### ブラウザ UI（`/ui/listen`）
+
+- マイクを `AudioContext` で取得し、**`ScriptProcessorNode` で 4096 フレームずつ Int16 PCM に変換して送信**。
+- 暫定結果は薄字、確定結果は太字で逐次表示（Deepgram 流）。`SpeechStarted` / `UtteranceEnd` / `Metadata` はログ欄に表示。
+- `Finalize` は使わず、停止時に `CloseStream` を送って最終結果を待つ。30 秒以内の無音で切断されないよう 8 秒ごとに `KeepAlive` を送る。
+- 言語・エンドポインティング・`UtteranceEnd`・API キー・interim / `vad_events` の ON/OFF をフォームで指定できる。
+- `index.html` と同じ流儀の1ファイル完結（素の HTML/CSS/JS、ビルド工程なし）。
+
+### デバッグ用 CLI
+
+```bash
+uv run python scripts/deepgram_client.py /path/to/audio.wav \
+  --language ja --interim-results --vad-events --utterance-end-ms 1000
+```
+
+wav（PyAV が開ける形式）を 16 kHz mono `linear16` に変換して 0.5 秒フレームで送信し、サーバメッセージを生ログで表示する。`--api-key` で `Authorization: Token`、`--finalize` で `Finalize` を送る。
+
+### 制限
+
+- 真のトークン逐次デコードは無い（faster-whisper 非対応）。あくまで「バッファ + エンドポインティング」による擬似ストリーム。
+- CPU 推論は実時間より遅いため interim は既定で控えめ（`WHISPER_LISTEN_INTERIM_INTERVAL_MS`）。`interim_results=false` でも final は成立する。
+- 推論は `ModelManager._lock` で HTTP と直列化される（同時接続時は待ちが発生）。
+- 1 チャンネルのみ。`mulaw`/`alaw`/コンテナ入力は未対応（`Error`）。
+
 ## 環境変数
 
 | env | 既定 | 意味 |
@@ -97,6 +185,7 @@ var/recordings/<YYYY-MM-DD>/<HHMMSS>-<6桁乱数>.json         # verbose_json �
 | `WHISPER_CONDITION_ON_PREVIOUS_TEXT` | `false` | 前セグメント出力を次セグメントの prompt に引き継ぐ（**既定 `false`。`true` は kotoba モデルで長尺が打ち切られる**） |
 | `WHISPER_SAVE_AUDIO` | `true` | アップロード音声の保存（`false` で無効化） |
 | `WHISPER_SAVE_AUDIO_DIR` | `<repo>/var/recordings` | 音声の保存先 |
+| `WHISPER_LISTEN_INTERIM_INTERVAL_MS` | `1500` | `/v1/listen` の interim 送信間隔（ms）。`interim_results=true` 時のみ有効 |
 
 例:
 
@@ -110,9 +199,11 @@ WHISPER_API_KEY=secret WHISPER_PORT=9000 WHISPER_MAX_UPLOAD_MB=50 uv run python 
 |---|---|---|
 | POST | `/v1/audio/transcriptions` | 文字起こし（multipart/form-data） |
 | POST | `/v1/audio/translations` | 英語への翻訳（`task=translate`） |
+| WS | `/v1/listen` | Deepgram 互換リアルタイム文字起こし（生 `linear16` PCM → `Results`/`Metadata`/`UtteranceEnd`/`SpeechStarted`） |
 | GET | `/v1/models` | OpenAI クライアントの疎通確認用モデル一覧 |
 | GET | `/healthz` | 死活監視（モデルロード状態・device・words 可用性） |
 | GET | `/ui` | 録音 UI（HTML。`/ui/` も 200） |
+| GET | `/ui/listen` | ストリーミング文字起こし UI（HTML） |
 | GET | `/api/recordings/<date>/<name>` | 保存済み録音音声の取得 |
 | GET | `/-/healthcheck/` | 起動待ちヘルスチェック（認証不要・常に `{"status":"ok"}`。スラッシュなしも 200） |
 | GET | `/` | 簡易情報（バージョン・対応エンドポイント） |
@@ -231,17 +322,23 @@ API 契約テスト（`tests/test_api.py`）はスタブの `ModelManager` を�
 whisper-local/
 ├── server/                       # `uv run python -m server` シム
 ├── scripts/smoke.py              # 実サーバ向けスモーク（httpx）
+├── scripts/deepgram_client.py    # WS /v1/listen のデバッグクライアント
+├── scripts/deepgram_sdk_check.py # Phase 4: 公式 deepgram-python-sdk 接続検証
 ├── src/whisper_local/
 │   ├── __init__.py               # 副作用なし・公開 API のみ
 │   ├── config.py                 # env -> Settings
 │   ├── alignment.py              # 層数検出 + alignment_heads 補正
-│   ├── transcriber.py            # モデル単一ロード / ロック直列化 / words
+│   ├── audio.py                  # linear16 -> 16k float32 / リサンプル / RMS
+│   ├── transcriber.py            # モデル単一ロード / ロック直列化 / words / transcribe_stream
 │   ├── schemas.py                # json / text / verbose_json 整形
 │   └── server/
-│       ├── app.py                # FastAPI アプリ本体
+│       ├── app.py                # FastAPI アプリ本体 / WS /v1/listen
+│       ├── listen.py             # Deepgram 互換プロトコル（状態/VAD/イベント）
 │       ├── main.py               # uvicorn 起動
 │       ├── openai_types.py       # OpenAI 互換型・エラー封筒
 │       ├── static/index.html     # 録音 UI（1ファイル完結）
+│       ├── static/listen.html    # ストリーミング文字起こし UI（1ファイル完結）
 │       └── format_srt.py         # srt / vtt 整形
-└── tests/test_api.py             # API 契約テスト
+├── tests/test_api.py             # API 契約テスト
+└── tests/test_listen.py          # WS /v1/listen 契約テスト
 ```

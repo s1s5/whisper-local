@@ -239,6 +239,44 @@ class ModelManager:
             word_timestamps_requested=bool(want_words),
         )
 
+    def transcribe_stream(
+        self,
+        samples,
+        *,
+        language: str | None = None,
+        task: str = "transcribe",
+        initial_prompt: str | None = None,
+        temperature: float = 0.0,
+        want_words: bool = False,
+        vad_filter: bool | None = None,
+    ) -> Iterable[Segment]:
+        """Yield segments one at a time (the generator counterpart of
+        :meth:`transcribe_array`).
+
+        The inference lock is held until the iterator is exhausted or closed,
+        so callers must consume the stream (or call ``close()`` on it) promptly.
+        faster-whisper has no incremental decoding: this only lets a caller act
+        on earlier segments without materializing the whole list.
+        """
+        model = self._model
+        if model is None:
+            raise ModelLoadError("model is not loaded")
+
+        word_timestamps = bool(want_words and self.words_enabled)
+        with self._lock:
+            segments, _info = model.transcribe(
+                samples,
+                language=language,
+                task=task,
+                beam_size=5,
+                temperature=temperature,
+                initial_prompt=initial_prompt,
+                word_timestamps=word_timestamps,
+                vad_filter=self.settings.vad_filter if vad_filter is None else vad_filter,
+                condition_on_previous_text=self.settings.condition_on_previous_text,
+            )
+            yield from segments
+
     def _run(
         self,
         model: WhisperModel,
