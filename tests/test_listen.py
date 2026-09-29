@@ -15,7 +15,14 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
 
-from whisper_local.audio import decode_linear16, resample_linear, rms
+from whisper_local.audio import (
+    decode_alaw,
+    decode_linear16,
+    decode_ulaw,
+    normalize_encoding,
+    resample_linear,
+    rms,
+)
 from whisper_local.config import Settings
 from whisper_local.server.app import create_app
 
@@ -88,6 +95,16 @@ def speech(seconds: float, amplitude: float = 0.3) -> bytes:
 
 def silence(seconds: float) -> bytes:
     return b"\x00" * (int(seconds * SAMPLE_RATE) * 2)
+
+
+# G.711 is 8 kHz, one byte per sample. 0x80 = full positive, 0xFF = silence.
+G711_RATE = 8000
+
+def mulaw_speech(seconds: float, byte: int = 0x80) -> bytes:
+    return bytes([byte]) * int(seconds * G711_RATE)
+
+def alaw_speech(seconds: float, byte: int = 0xAA) -> bytes:
+    return bytes([byte]) * int(seconds * G711_RATE)
 
 
 # -- happy paths -----------------------------------------------------------
@@ -233,10 +250,58 @@ def test_channels_greater_than_one_is_rejected():
 
 def test_unsupported_encoding_is_rejected():
     client, _ = make_client()
-    with client.websocket_connect("/v1/listen?encoding=mulaw") as ws:
+    with client.websocket_connect("/v1/listen?encoding=opus") as ws:
         error = ws.receive_json()
     assert error["type"] == "Error"
     assert "encoding" in error["err_msg"]
+
+
+def test_mulaw_encoding_is_accepted_and_transcribes():
+    client, _ = make_client()
+    with client.websocket_connect("/v1/listen?encoding=mulaw&sample_rate=8000") as ws:
+        ws.send_bytes(mulaw_speech(0.6))
+        ws.send_json({"type": "Finalize"})
+        final = ws.receive_json()
+    assert final["type"] == "Results"
+    assert final["channel"]["alternatives"][0]["transcript"] == TRANSCRIPT
+
+
+def test_g711_ulaw_alias_is_accepted():
+    # OpenClaw's Dictation relay sends encoding=g711_ulaw at 8000 Hz.
+    client, _ = make_client()
+    with client.websocket_connect("/v1/listen?encoding=g711_ulaw&sample_rate=8000") as ws:
+        ws.send_bytes(mulaw_speech(0.6))
+        ws.send_json({"type": "Finalize"})
+        assert ws.receive_json()["type"] == "Results"
+
+
+def test_g711_alaw_alias_is_accepted_and_transcribes():
+    client, _ = make_client()
+    with client.websocket_connect("/v1/listen?encoding=g711_alaw&sample_rate=8000") as ws:
+        ws.send_bytes(alaw_speech(0.6))
+        ws.send_json({"type": "Finalize"})
+        final = ws.receive_json()
+    assert final["type"] == "Results"
+    assert final["channel"]["alternatives"][0]["transcript"] == TRANSCRIPT
+
+
+def test_g711_defaults_to_8000_when_sample_rate_omitted():
+    client, manager = make_client()
+    with client.websocket_connect("/v1/listen?encoding=mulaw") as ws:
+        ws.send_bytes(mulaw_speech(0.6))
+        ws.send_json({"type": "Finalize"})
+        assert ws.receive_json()["type"] == "Results"
+    # 0.6 s of 8 kHz mulaw resampled to 16 kHz -> ~9600 samples at the decoder.
+    assert 9000 <= manager.calls[-1]["samples"] <= 10000
+
+
+def test_pure_silence_in_mulaw_never_emits_a_final():
+    client, _ = make_client()
+    with client.websocket_connect("/v1/listen?encoding=mulaw&sample_rate=8000") as ws:
+        ws.send_bytes(mulaw_speech(0.5, byte=0xFF))  # 0xFF decodes to 0.0
+        ws.send_json({"type": "CloseStream"})
+        metadata = ws.receive_json()
+    assert metadata["type"] == "Metadata"
 
 
 def test_unknown_message_type_is_rejected():
@@ -343,6 +408,43 @@ def test_decode_linear16_resamples_8k_to_16k():
 def test_decode_linear16_rejects_odd_length():
     with pytest.raises(Exception):
         decode_linear16(b"\x01\x02\x03", sample_rate=SAMPLE_RATE)
+
+
+def test_decode_ulaw_matches_ffmpeg_reference_values():
+    # Table validated byte-for-byte against ffmpeg's mulaw decoder.
+    def d(code: int) -> int:
+        return round(float(decode_ulaw(bytes([code]), sample_rate=8000, target_rate=8000)[0]) * 32768)
+
+    assert d(0x00) == -32124
+    assert d(0x80) == 32124
+    assert d(0xFF) == 0
+
+
+def test_decode_alaw_matches_ffmpeg_reference_values():
+    def d(code: int) -> int:
+        return round(float(decode_alaw(bytes([code]), sample_rate=8000, target_rate=8000)[0]) * 32768)
+
+    assert d(0x00) == -5504
+    assert d(0xAA) == 32256
+    # A-law has no exact zero: the smallest magnitudes are -8 and +8.
+    assert d(0x55) == -8
+    assert d(0xD5) == 8
+
+
+def test_decode_g711_resamples_8k_to_16k():
+    assert decode_ulaw(bytes([0x80]) * 8000, sample_rate=8000).size == 16000
+    assert decode_alaw(bytes([0xAA]) * 8000, sample_rate=8000).size == 16000
+
+
+def test_normalize_encoding_aliases():
+    assert normalize_encoding("linear16") == "linear16"
+    assert normalize_encoding("pcm16") == "linear16"
+    assert normalize_encoding("mulaw") == "mulaw"
+    assert normalize_encoding("G711_ULAW") == "mulaw"
+    assert normalize_encoding("ulaw") == "mulaw"
+    assert normalize_encoding("g711_alaw") == "alaw"
+    with pytest.raises(Exception):
+        normalize_encoding("opus")
 
 
 def test_resample_linear_downsample_length():

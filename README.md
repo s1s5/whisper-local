@@ -109,8 +109,8 @@ uv run python scripts/deepgram_client.py /path/to/audio.wav --language ja --fina
 |---|---|---|
 | `model` | — | 受理（ログ用。実体は起動時の faster-whisper に固定） |
 | `language` | `ja` | 受理（ISO-639-1） |
-| `encoding` | `linear16` | **`linear16` のみ実装**。他は `Error` |
-| `sample_rate` | `16000` | 受理（linear16 のレート。16k 以外は numpy でリサンプル） |
+| `encoding` | `linear16` | `linear16` / `mulaw` / `alaw`。別名 `pcm16` `ulaw` `g711_ulaw` `g711_alaw` も受理。他は `Error` |
+| `sample_rate` | encoding 依存 | `linear16`→`16000`、`mulaw`/`alaw`→`8000`。省略時はこの既定。16k 以外は numpy でリサンプル |
 | `channels` | `1` | `1` のみ。`>1` は `Error` |
 | `interim_results` | `false` | `true` で interim `Results`（`is_final=false`）を送出 |
 | `endpointing` | `500`(PoC内部既定) | final 判定の無音長（ms）。`false`/`0` で無効 |
@@ -158,16 +158,19 @@ uv run python scripts/deepgram_client.py /path/to/audio.wav --language ja --fina
 ```bash
 uv run python scripts/deepgram_client.py /path/to/audio.wav \
   --language ja --interim-results --vad-events --utterance-end-ms 1000
+
+# G.711 µ-law / 8 kHz（OpenClaw の Dictation relay と同じ形式）
+uv run python scripts/deepgram_client.py /path/to/audio.wav --encoding g711_ulaw
 ```
 
-wav（PyAV が開ける形式）を 16 kHz mono `linear16` に変換して 0.5 秒フレームで送信し、サーバメッセージを生ログで表示する。`--api-key` で `Authorization: Token`、`--finalize` で `Finalize` を送る。
+wav（PyAV が開ける形式）を `--encoding` に応じた形式（既定 `linear16`/16 kHz、`mulaw`/`alaw` は ffmpeg で G.711 へ圧縮し 8 kHz）に変換して 0.5 秒フレームで送信し、サーバメッセージを生ログで表示する。`--api-key` で `Authorization: Token`、`--finalize` で `Finalize` を送る。
 
 ### 制限
 
 - 真のトークン逐次デコードは無い（faster-whisper 非対応）。あくまで「バッファ + エンドポインティング」による擬似ストリーム。
 - CPU 推論は実時間より遅いため interim は既定で控えめ（`WHISPER_LISTEN_INTERIM_INTERVAL_MS`）。`interim_results=false` でも final は成立する。
 - 推論は `ModelManager._lock` で HTTP と直列化される（同時接続時は待ちが発生）。
-- 1 チャンネルのみ。`mulaw`/`alaw`/コンテナ入力は未対応（`Error`）。
+- 1 チャンネルのみ。`encoding` は `linear16` / `mulaw` / `alaw`（別名 `g711_ulaw` `g711_alaw`）。G.711 は 8 kHz・1 サンプル 1 バイトで、Python 3.13 で削除された stdlib `audioop` の代わりに numpy 実装（ffmpeg のデコード結果と全 256 値一致を確認済み）。コンテナ入力（webm/opus 等）は未対応（`Error`）。
 
 ## 環境変数
 

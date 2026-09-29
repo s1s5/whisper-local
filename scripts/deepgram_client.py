@@ -28,21 +28,42 @@ from faster_whisper.audio import decode_audio
 
 DEFAULT_URL = "ws://127.0.0.1:8000/v1/listen"
 SAMPLE_RATE = 16000
+G711_SAMPLE_RATE = 8000
 FRAME_SECONDS = 0.5
 
 
-def decode_to_pcm(path: str) -> bytes:
-    """Decode any PyAV-supported file into 16 kHz mono ``linear16`` bytes."""
-    samples = decode_audio(path, sampling_rate=SAMPLE_RATE)
-    audio = np.asarray(samples, dtype=np.float32)
-    clipped = np.clip(audio, -1.0, 1.0)
-    return (clipped * 32767.0).astype("<i2").tobytes()
+def decode_to_pcm(path: str, *, encoding: str = "linear16", sample_rate: int = SAMPLE_RATE) -> bytes:
+    """Decode any PyAV-supported file into the requested wire format.
+
+    ``linear16`` -> little-endian int16 at ``sample_rate``; ``mulaw``/``alaw`` ->
+    one G.711 byte per sample at ``sample_rate`` (ffmpeg does the companding).
+    """
+    if encoding == "linear16":
+        samples = decode_audio(path, sampling_rate=sample_rate)
+        audio = np.asarray(samples, dtype=np.float32)
+        clipped = np.clip(audio, -1.0, 1.0)
+        return (clipped * 32767.0).astype("<i2").tobytes()
+
+    if encoding not in {"mulaw", "alaw"}:
+        raise ValueError(f"unsupported --encoding {encoding!r}")
+
+    import subprocess
+
+    codec = "mulaw" if encoding == "mulaw" else "alaw"
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", path,
+         "-ar", str(sample_rate), "-ac", "1", "-f", codec, "pipe:1"],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode()[:200]}")
+    return proc.stdout
 
 
 def build_url(args: argparse.Namespace) -> str:
     params = [
-        ("encoding", "linear16"),
-        ("sample_rate", str(SAMPLE_RATE)),
+        ("encoding", args.encoding),
+        ("sample_rate", str(args.sample_rate)),
         ("channels", "1"),
         ("language", args.language),
         ("interim_results", "true" if args.interim_results else "false"),
@@ -93,10 +114,19 @@ def print_message(raw: str) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    # G.711 defaults to 8 kHz, linear16 to 16 kHz; an explicit flag wins.
+    encoding = {"g711_ulaw": "mulaw", "g711_alaw": "alaw"}.get(args.encoding, args.encoding)
+    if args.sample_rate is None:
+        args.sample_rate = G711_SAMPLE_RATE if encoding in {"mulaw", "alaw"} else SAMPLE_RATE
+    args.encoding = encoding
+
     try:
-        pcm = decode_to_pcm(args.audio)
+        pcm = decode_to_pcm(args.audio, encoding=encoding, sample_rate=args.sample_rate)
     except AudioDecodeError as exc:
         print(f"failed to decode {args.audio!r}: {exc}", file=sys.stderr)
+        return 2
+    except (ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
         return 2
 
     url = build_url(args)
@@ -106,11 +136,16 @@ def run(args: argparse.Namespace) -> int:
         if args.extra_header_token:
             headers["x-deepgram-session-id"] = "local-poc"
 
-    total_samples = len(pcm) // 2
+    # G.711 is one byte per sample; linear16 is two.
+    bytes_per_sample = 1 if encoding in {"mulaw", "alaw"} else 2
+    total_samples = len(pcm) // bytes_per_sample
     print(f"connecting: {url}")
-    print(f"audio: {args.audio} -> {total_samples / SAMPLE_RATE:.2f}s of 16 kHz mono linear16")
+    print(
+        f"audio: {args.audio} -> {total_samples / args.sample_rate:.2f}s of "
+        f"{args.sample_rate} Hz mono {encoding}"
+    )
 
-    frame_bytes = int(FRAME_SECONDS * SAMPLE_RATE) * 2
+    frame_bytes = int(FRAME_SECONDS * args.sample_rate) * bytes_per_sample
     with connect(url, additional_headers=headers) as ws:
         print("[client] connected; streaming audio")
         for offset in range(0, len(pcm), frame_bytes):
@@ -144,6 +179,18 @@ def main() -> int:
     parser.add_argument("--api-key", default=None, help="sent as 'Authorization: Token <key>'")
     parser.add_argument("--language", default="ja")
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--encoding",
+        default="linear16",
+        choices=["linear16", "mulaw", "alaw", "g711_ulaw", "g711_alaw"],
+        help="wire encoding (default linear16)",
+    )
+    parser.add_argument(
+        "--sample-rate",
+        type=int,
+        default=None,
+        help="wire sample rate (default: 16000 for linear16, 8000 for G.711)",
+    )
     parser.add_argument("--endpointing", type=int, default=None, help="endpointing ms")
     parser.add_argument("--utterance-end-ms", type=int, default=None)
     parser.add_argument("--interim-results", action="store_true")

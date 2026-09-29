@@ -51,7 +51,8 @@ MIN_INTERIM_SECONDS = 0.3
 # minutes of silence to the decoder at the start of a session).
 MAX_LEADING_SILENCE_SECONDS = 2.0
 
-SUPPORTED_ENCODING = "linear16"
+SUPPORTED_ENCODINGS = ("linear16", "mulaw", "alaw")
+DEFAULT_ENCODING = "linear16"
 SUPPORTED_CHANNELS = 1
 SUBPROTOCOL_TOKEN = "token"
 
@@ -89,7 +90,7 @@ class ListenOptions:
 
     model: Optional[str] = None
     language: str = "ja"
-    encoding: str = SUPPORTED_ENCODING
+    encoding: str = DEFAULT_ENCODING
     sample_rate: int = TARGET_SAMPLE_RATE
     channels: int = SUPPORTED_CHANNELS
     interim_results: bool = False
@@ -132,14 +133,18 @@ def parse_query(params: Mapping[str, str]) -> ListenOptions:
             f"Unsupported channels={channels}; only mono (channels=1) is supported.",
         )
 
-    encoding = (params.get("encoding") or SUPPORTED_ENCODING).strip().lower()
-    if encoding != SUPPORTED_ENCODING:
+    encoding_raw = (params.get("encoding") or DEFAULT_ENCODING).strip() or DEFAULT_ENCODING
+    try:
+        encoding = audio_utils.normalize_encoding(encoding_raw)
+    except audio_utils.AudioDecodeError as exc:
+        supported = ", ".join(sorted(audio_utils.ENCODING_ALIASES))
         raise ListenProtocolError(
             "Bad Request",
-            f"Unsupported encoding={encoding!r}; only 'linear16' is supported.",
-        )
+            f"Unsupported encoding={encoding_raw!r}; supported: {supported}.",
+        ) from exc
 
-    raw_sample_rate = params.get("sample_rate", str(TARGET_SAMPLE_RATE))
+    default_rate = audio_utils.DEFAULT_SAMPLE_RATE_BY_ENCODING[encoding]
+    raw_sample_rate = params.get("sample_rate", str(default_rate))
     sample_rate = _to_int(raw_sample_rate, "sample_rate")
     if sample_rate <= 0:
         raise ListenProtocolError("Bad Request", f"Invalid sample_rate={sample_rate}")
@@ -237,6 +242,7 @@ class ListenSession:
         self.model_uuid = str(uuid.uuid4())
 
         self.sample_rate = options.sample_rate
+        self.encoding = options.encoding
         self.endpointing_ms = options.endpointing_ms
         self.interim_interval_ms = max(1, settings.listen_interim_interval_ms)
 
@@ -446,7 +452,9 @@ class ListenSession:
     async def on_media(self, payload: bytes) -> None:
         self._hash.update(payload)
         try:
-            frame = audio_utils.decode_linear16(payload, sample_rate=self.sample_rate)
+            frame = audio_utils.decode_frame(
+                payload, encoding=self.encoding, sample_rate=self.sample_rate
+            )
         except Exception as exc:  # noqa: BLE001 - malformed frame is a client error
             await self.send_error("Bad Request", f"Failed to decode audio frame: {exc}")
             return
