@@ -15,10 +15,18 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 DEFAULT_MAX_UPLOAD_MB = 100
 
+# faster-whisper's default is True, but the kotoba model collapses (inference
+# stops early and the rest of a long clip is dropped) when it is enabled.
+DEFAULT_CONDITION_ON_PREVIOUS_TEXT = False
+
 
 def repo_root() -> Path:
     """Repository root (``<repo>/src/whisper_local/config.py`` -> ``<repo>``)."""
     return Path(__file__).resolve().parents[2]
+
+
+DEFAULT_SAVE_AUDIO = True
+DEFAULT_SAVE_AUDIO_DIR = repo_root() / "var" / "recordings"
 
 
 def _int(value: str | None, default: int, name: str) -> int:
@@ -63,11 +71,15 @@ class Settings:
     max_upload_mb: int = DEFAULT_MAX_UPLOAD_MB
     cpu_threads: int = 0
     vad_filter: bool = False
+    condition_on_previous_text: bool = DEFAULT_CONDITION_ON_PREVIOUS_TEXT
     models_root: Path = Path("var/models")
+    save_audio: bool = DEFAULT_SAVE_AUDIO
+    save_audio_dir: Path = DEFAULT_SAVE_AUDIO_DIR
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         env = os.environ if env is None else env
+        raw_save_dir = _str(env.get("WHISPER_SAVE_AUDIO_DIR"))
         return cls(
             model=_str(env.get("WHISPER_MODEL")) or DEFAULT_MODEL,
             device=_str(env.get("WHISPER_DEVICE")) or "auto",
@@ -82,5 +94,14 @@ class Settings:
             ),
             cpu_threads=_int(env.get("WHISPER_CPU_THREADS"), 0, "WHISPER_CPU_THREADS"),
             vad_filter=_bool(env.get("WHISPER_VAD_FILTER"), False, "WHISPER_VAD_FILTER"),
+            condition_on_previous_text=_bool(
+                env.get("WHISPER_CONDITION_ON_PREVIOUS_TEXT"),
+                DEFAULT_CONDITION_ON_PREVIOUS_TEXT,
+                "WHISPER_CONDITION_ON_PREVIOUS_TEXT",
+            ),
             models_root=repo_root() / "var" / "models",
+            save_audio=_bool(
+                env.get("WHISPER_SAVE_AUDIO"), DEFAULT_SAVE_AUDIO, "WHISPER_SAVE_AUDIO"
+            ),
+            save_audio_dir=Path(raw_save_dir) if raw_save_dir else DEFAULT_SAVE_AUDIO_DIR,
         )

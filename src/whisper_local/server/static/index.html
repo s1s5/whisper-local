@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>whisper-local 録音</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1c1c1e;
+    --muted: #6b6b70;
+    --line: #d8d8dd;
+    --bg: #f6f6f8;
+    --card: #ffffff;
+    --accent: #d92c2c;
+    --accent-weak: #f0d3d3;
+    --ok: #127a3d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #ececf1;
+      --muted: #9b9ba3;
+      --line: #3a3a40;
+      --bg: #17171a;
+      --card: #202024;
+      --accent: #ff5a5a;
+      --accent-weak: #4a2424;
+      --ok: #4fd07f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px 64px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .meta { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  .meta .badge { border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; margin-right: 6px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .status { font-size: 15px; margin-bottom: 12px; min-height: 24px; }
+  .status.recording { color: var(--accent); font-weight: 600; }
+  .status.busy { color: var(--muted); }
+  .status.error { color: var(--accent); }
+  .status .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: currentColor; margin-right: 8px; vertical-align: 1px; }
+  .status.recording .dot { animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--muted); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+  button {
+    font: inherit;
+    padding: 9px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+  .result h2, .history h2 { font-size: 14px; color: var(--muted); margin: 0 0 8px; text-transform: none; }
+  .result-text {
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-break: break-word;
+    min-height: 3.4em;
+    user-select: text;
+  }
+  .result-text.empty { color: var(--muted); font-weight: 400; font-size: 15px; }
+  .result-audio {
+    display: block; width: 100%; margin-top: 10px;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+  }
+  .result-audio[hidden] { display: none; }
+  details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 14px; }
+  .detail-body { font-size: 13px; margin-top: 10px; }
+  .detail-body h3 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  .kv { margin: 0; padding: 0; list-style: none; }
+  .kv li { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .kv .k { color: var(--muted); }
+  .history-list { list-style: none; margin: 0; padding: 0; }
+  .history-list li { border-bottom: 1px solid var(--line); }
+  .history-list .item {
+    width: 100%; text-align: left; border: 0; background: none; padding: 9px 4px;
+    display: flex; gap: 10px; align-items: center;
+    color: var(--fg); font: inherit; cursor: pointer;
+  }
+  .history-list .item:hover { background: var(--bg); }
+  .history-list .time { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .history-list .preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .history-list .play {
+    flex: 0 0 auto; width: 26px; height: 26px; padding: 0; line-height: 1;
+    border: 1px solid var(--line); border-radius: 50%; background: var(--card);
+    color: var(--fg); cursor: pointer; font-size: 11px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .history-list .play:hover:not(:disabled) { border-color: var(--muted); }
+  .history-list .play:disabled { opacity: 0.35; cursor: not-allowed; }
+  .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+  .notice { border-left: 3px solid var(--accent); background: var(--accent-weak); padding: 10px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; }
+  .notice[hidden] { display: none; }
+  .apikey { margin-top: 14px; font-size: 13px; }
+  .apikey label { color: var(--muted); display: block; margin-bottom: 4px; }
+  .apikey input { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--fg); width: 100%; max-width: 320px; }
+  .error-box { color: var(--accent); font-size: 13px; white-space: pre-wrap; margin-top: 8px; }
+  .error-box[hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>whisper-local 録音</h1>
+  <p class="meta" id="meta">サーバ情報を取得中…</p>
+
+  <div class="notice" id="notice" hidden></div>
+
+  <section class="card">
+    <div class="status" id="status"><span class="dot"></span>待機中</div>
+    <div class="buttons">
+      <button class="primary" id="start">● 録音開始</button>
+      <button id="stop" disabled>■ 停止して認識</button>
+      <button id="clear" disabled>クリア</button>
+      <button id="copy" disabled>結果をコピー</button>
+    </div>
+    <div class="apikey">
+      <label for="apikey">API キー（任意・WHISPER_API_KEY 設定時のみ）</label>
+      <input type="password" id="apikey" placeholder="未入力なら送信しません" autocomplete="off" spellcheck="false">
+    </div>
+  </section>
+
+  <section class="card result">
+    <h2>認識結果</h2>
+    <div class="result-text empty" id="resultText">ここに認識結果が表示されます。</div>
+    <audio id="resultAudio" class="result-audio" controls preload="metadata" hidden></audio>
+    <div class="error-box" id="errorBox" hidden></div>
+    <details id="details" hidden>
+      <summary>詳細（セグメント / words / 処理時間）</summary>
+      <div class="detail-body" id="detailBody"></div>
+    </details>
+  </section>
+
+  <section class="card history">
+    <h2>セッション履歴（リロードで消えます）</h2>
+    <ul class="history-list" id="historyList"></ul>
+    <p class="hint" id="historyHint">まだ履歴はありません。</p>
+    <audio id="historyAudio" preload="none" hidden></audio>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+const el = (id) => document.getElementById(id);
+const statusEl = el("status");
+const noticeEl = el("notice");
+const startBtn = el("start");
+const stopBtn = el("stop");
+const clearBtn = el("clear");
+const copyBtn = el("copy");
+const resultTextEl = el("resultText");
+const resultAudioEl = el("resultAudio");
+const errorBoxEl = el("errorBox");
+const detailsEl = el("details");
+const detailBodyEl = el("detailBody");
+const historyListEl = el("historyList");
+const historyHintEl = el("historyHint");
+const historyAudioEl = el("historyAudio");
+const apiKeyEl = el("apikey");
+const metaEl = el("meta");
+
+const MIME_CANDIDATES = ["audio/webm;codecs=opus", "audio/mp4", "audio/webm"];
+const MAX_HISTORY = 20;
+
+const state = {
+  recorder: null,
+  chunks: [],
+  stream: null,
+  timer: null,
+  startedAt: 0,
+  elapsedMs: 0,
+  busy: false,
+  history: [],
+  lastResult: null,
+  audioUrls: new Set(),
+  lastRecordedUrl: null,
+};
+
+// -- helpers ---------------------------------------------------------------
+
+function setStatus(text, kind) {
+  statusEl.className = "status" + (kind ? " " + kind : "");
+  statusEl.innerHTML = "";
+  if (kind === "recording") {
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    statusEl.appendChild(dot);
+  } else if (kind === "busy") {
+    const spin = document.createElement("span");
+    spin.className = "spin";
+    statusEl.appendChild(spin);
+  }
+  statusEl.appendChild(document.createTextNode(text));
+}
+
+function showNotice(text) {
+  noticeEl.textContent = text;
+  noticeEl.hidden = false;
+}
+
+function showError(text) {
+  errorBoxEl.textContent = text;
+  errorBoxEl.hidden = false;
+}
+
+function clearError() {
+  errorBoxEl.textContent = "";
+  errorBoxEl.hidden = true;
+}
+
+function formatClock(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const mm = String(Math.floor(total / 60)).padStart(2, "0");
+  const ss = String(total % 60).padStart(2, "0");
+  return mm + ":" + ss;
+}
+
+function formatSeconds(value) {
+  if (value == null || isNaN(value)) return "-";
+  return Number(value).toFixed(2) + " s";
+}
+
+function pickMimeType() {
+  if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return "";
+  for (const candidate of MIME_CANDIDATES) {
+    if (MediaRecorder.isTypeSupported(candidate)) return candidate;
+  }
+  return "";
+}
+
+function extensionForMime(mime) {
+  if (!mime) return "webm";
+  if (mime.indexOf("mp4") !== -1) return "m4a";
+  if (mime.indexOf("ogg") !== -1) return "ogg";
+  if (mime.indexOf("webm") !== -1) return "webm";
+  return "webm";
+}
+
+function setButtons(recording) {
+  startBtn.disabled = recording || state.busy;
+  stopBtn.disabled = !recording || state.busy;
+  clearBtn.disabled = state.busy || (!state.lastResult && state.history.length === 0 && !state.lastRecordedUrl);
+  copyBtn.disabled = !state.lastResult || !state.lastResult.text;
+}
+
+// -- audio object URLs -----------------------------------------------------
+
+function createAudioUrl(blob) {
+  const url = URL.createObjectURL(blob);
+  state.audioUrls.add(url);
+  return url;
+}
+
+function revokeAudioUrl(url) {
+  if (!url || !state.audioUrls.has(url)) return;
+  state.audioUrls.delete(url);
+  URL.revokeObjectURL(url);
+  if (resultAudioEl.getAttribute("src") === url) setResultAudio(null);
+  if (historyAudioEl.getAttribute("src") === url) {
+    historyAudioEl.pause();
+    historyAudioEl.removeAttribute("src");
+  }
+}
+
+function revokeAllAudioUrls() {
+  for (const url of state.audioUrls) URL.revokeObjectURL(url);
+  state.audioUrls.clear();
+  setResultAudio(null);
+  historyAudioEl.pause();
+  historyAudioEl.removeAttribute("src");
+}
+
+function setResultAudio(url) {
+  if (!url) {
+    resultAudioEl.pause();
+    resultAudioEl.removeAttribute("src");
+    resultAudioEl.hidden = true;
+    return;
+  }
+  if (resultAudioEl.getAttribute("src") !== url) {
+    resultAudioEl.pause();
+    resultAudioEl.setAttribute("src", url);
+  }
+  resultAudioEl.hidden = false;
+}
+
+function playRecording(entry) {
+  if (!entry || !entry.audioUrl) return;
+  historyAudioEl.pause();
+  historyAudioEl.setAttribute("src", entry.audioUrl);
+  const played = historyAudioEl.play();
+  if (played && typeof played.catch === "function") played.catch(() => {});
+}
+
+// -- healthz ---------------------------------------------------------------
+
+async function loadServerInfo() {
+  try {
+    const res = await fetch("/healthz");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const info = await res.json();
+    const parts = [];
+    parts.push('<span class="badge">model: ' + escapeHtml(info.model || "?") + "</span>");
+    parts.push('<span class="badge">device: ' + escapeHtml(info.device || "?") + "</span>");
+    const loaded = info.model_loaded ? "loaded" : "loading…";
+    parts.push('<span class="badge">model_loaded: ' + escapeHtml(String(loaded)) + "</span>");
+    if (info.words_available === false) parts.push("word timestamps 無効");
+    metaEl.innerHTML = parts.join(" ");
+    if (!info.model_loaded) setStatus("モデル読込中…", "busy");
+  } catch (err) {
+    metaEl.textContent = "サーバ情報を取得できませんでした（" + err.message + "）";
+  }
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[ch]));
+}
+
+// -- recording -------------------------------------------------------------
+
+function preflightMicrophone() {
+  if (!window.isSecureContext) {
+    return "このページは安全なコンテキストではありません。http://127.0.0.1:8000/ui または http://localhost:8000/ui で開いてください。";
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return "このブラウザはマイク録音（getUserMedia）に対応していません。Chrome / Firefox の最新版をお使いください。";
+  }
+  return null;
+}
+
+async function startRecording() {
+  clearError();
+  const blocked = preflightMicrophone();
+  if (blocked) { showNotice(blocked); return; }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    showNotice("マイクを使用できません: " + (err && err.message ? err.message : err) + "（ブラウザのマイク許可を確認してください）");
+    return;
+  }
+
+  const mimeType = pickMimeType();
+  let recorder;
+  try {
+    recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  } catch (err) {
+    stream.getTracks().forEach((t) => t.stop());
+    showNotice("MediaRecorder を開始できません: " + (err && err.message ? err.message : err));
+    return;
+  }
+
+  state.recorder = recorder;
+  state.stream = stream;
+  state.chunks = [];
+  state.startedAt = Date.now();
+
+  recorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) state.chunks.push(event.data);
+  };
+  recorder.onstop = () => {
+    stopTimer();
+    state.elapsedMs = Date.now() - state.startedAt;
+    releaseStream();
+    const type = recorder.mimeType || mimeType || "audio/webm";
+    const blob = new Blob(state.chunks, { type });
+    state.chunks = [];
+    if (blob.size === 0) {
+      setStatus("録音データが空でした", "error");
+      showNotice("録音データが空でした。マイクがミュートされていないか確認してください。");
+      setButtons(false);
+      return;
+    }
+    const audioUrl = createAudioUrl(blob);
+    const previous = state.lastRecordedUrl;
+    state.lastRecordedUrl = audioUrl;
+    // 直前の録音 URL が履歴に残っていなければ解放する（失敗時の URL を溜めない）
+    if (previous && previous !== audioUrl &&
+        !state.history.some((e) => e.audioUrl === previous)) {
+      revokeAudioUrl(previous);
+    }
+    sendForTranscription(blob, type, audioUrl);
+  };
+  recorder.onerror = (event) => {
+    stopTimer();
+    releaseStream();
+    setButtons(false);
+    setStatus("録音エラー", "error");
+    showNotice("録音中にエラーが発生しました: " + (event.error && event.error.name ? event.error.name : "unknown"));
+  };
+
+  recorder.start(250);
+  setStatus("録音中 " + formatClock(0), "recording");
+  setButtons(true);
+  state.timer = window.setInterval(() => {
+    setStatus("録音中 " + formatClock(Date.now() - state.startedAt), "recording");
+  }, 100);
+}
+
+function stopRecording() {
+  if (state.recorder && state.recorder.state !== "inactive") {
+    setStatus("処理中…", "busy");
+    state.recorder.stop();
+  }
+}
+
+function stopTimer() {
+  if (state.timer) { window.clearInterval(state.timer); state.timer = null; }
+}
+
+function releaseStream() {
+  if (state.stream) {
+    state.stream.getTracks().forEach((track) => track.stop());
+    state.stream = null;
+  }
+  state.recorder = null;
+}
+
+// -- upload ----------------------------------------------------------------
+
+async function sendForTranscription(blob, mimeType, audioUrl) {
+  state.busy = true;
+  setButtons(false);
+  setStatus("認識中…", "busy");
+  clearError();
+
+  const form = new FormData();
+  form.append("file", blob, "recording." + extensionForMime(mimeType));
+  form.append("model", "whisper-1");
+  form.append("response_format", "verbose_json");
+  form.append("timestamp_granularities[]", "word");
+  form.append("language", "ja");
+
+  const headers = {};
+  const apiKey = apiKeyEl.value.trim();
+  if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+
+  const startedAt = performance.now();
+  try {
+    const res = await fetch("/v1/audio/transcriptions", { method: "POST", body: form, headers });
+    const processingMs = performance.now() - startedAt;
+    const payload = await res.json().catch(() => null);
+    if (!res.ok) {
+      const message = payload && payload.error && payload.error.message
+        ? payload.error.message
+        : "HTTP " + res.status;
+      throw new Error(message);
+    }
+    showResult(payload, state.elapsedMs, processingMs, audioUrl);
+  } catch (err) {
+    state.lastResult = null;
+    setResultAudio(audioUrl); // 失敗時も録音は聞き返せるようにする
+    setStatus("失敗", "error");
+    showError(err && err.message ? err.message : String(err));
+  } finally {
+    state.busy = false;
+    setButtons(false);
+  }
+}
+
+// -- result rendering ------------------------------------------------------
+
+function showResult(payload, audioMs, processingMs, audioUrl) {
+  const text = (payload && payload.text ? payload.text : "").trim();
+  const entry = {
+    at: new Date(),
+    audioMs,
+    processingMs,
+    payload,
+    text,
+    audioUrl,
+  };
+  state.lastResult = entry;
+  renderResult(entry);
+  pushHistory(entry);
+  setStatus("完了 " + formatClock(audioMs) + " の音声を " + formatSeconds(processingMs / 1000) + " で認識しました");
+}
+
+function renderResult(entry) {
+  const payload = entry.payload || {};
+  resultTextEl.textContent = entry.text || "(無音、または認識結果が空でした)";
+  resultTextEl.classList.toggle("empty", !entry.text);
+  setResultAudio(entry.audioUrl);
+
+  const rows = [];
+  rows.push(kv("音声長（クライアント計測）", formatClock(entry.audioMs)));
+  rows.push(kv("処理時間", formatSeconds(entry.processingMs / 1000)));
+  if (payload.duration != null) rows.push(kv("音声長（サーバ計測）", formatSeconds(payload.duration)));
+  if (payload.language) rows.push(kv("言語", payload.language));
+  if (payload.task) rows.push(kv("タスク", payload.task));
+
+  let html = '<ul class="kv">' + rows.join("") + "</ul>";
+
+  const segments = payload.segments || [];
+  html += "<h3>セグメント (" + segments.length + ")</h3>";
+  if (segments.length) {
+    html += "<table><thead><tr><th>#</th><th>start</th><th>end</th><th>text</th></tr></thead><tbody>";
+    for (const seg of segments) {
+      html += "<tr><td>" + escapeHtml(seg.id) + "</td><td>" + escapeHtml(formatSeconds(seg.start)) +
+        "</td><td>" + escapeHtml(formatSeconds(seg.end)) + "</td><td>" + escapeHtml(seg.text) + "</td></tr>";
+    }
+    html += "</tbody></table>";
+  } else {
+    html += '<p class="hint">セグメントはありません。</p>';
+  }
+
+  const words = payload.words || [];
+  html += "<h3>words (" + words.length + ")</h3>";
+  if (words.length) {
+    html += "<table><thead><tr><th>word</th><th>start</th><th>end</th></tr></thead><tbody>";
+    for (const word of words) {
+      html += "<tr><td>" + escapeHtml(word.word) + "</td><td>" + escapeHtml(formatSeconds(word.start)) +
+        "</td><td>" + escapeHtml(formatSeconds(word.end)) + "</td></tr>";
+    }
+    html += "</tbody></table>";
+  } else {
+    html += '<p class="hint">word timestamps はありません（モデル側で無効の可能性）。</p>';
+  }
+
+  detailBodyEl.innerHTML = html;
+  detailsEl.hidden = false;
+  detailsEl.open = false;
+}
+
+function kv(key, value) {
+  return '<li><span class="k">' + escapeHtml(key) + "</span><span>" + escapeHtml(value) + "</span></li>";
+}
+
+// -- history ---------------------------------------------------------------
+
+function pushHistory(entry) {
+  state.history.unshift(entry);
+  if (state.history.length > MAX_HISTORY) {
+    const dropped = state.history.splice(MAX_HISTORY);
+    for (const old of dropped) {
+      // 結果表示に使っている URL はまだ残す（表示中の再生を壊さない）
+      if (state.lastResult && old.audioUrl === state.lastResult.audioUrl) continue;
+      revokeAudioUrl(old.audioUrl);
+    }
+  }
+  renderHistory();
+}
+
+function renderHistory() {
+  historyListEl.innerHTML = "";
+  historyHintEl.hidden = state.history.length > 0;
+  state.history.forEach((entry) => {
+    const li = document.createElement("li");
+    const row = document.createElement("div");
+    row.className = "item";
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
+    row.title = entry.text;
+
+    const time = document.createElement("span");
+    time.className = "time";
+    time.textContent = entry.at.toLocaleTimeString("ja-JP") + " · " + formatClock(entry.audioMs);
+
+    const preview = document.createElement("span");
+    preview.className = "preview";
+    preview.textContent = entry.text || "(空)";
+
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "play";
+    play.textContent = "▶";
+    play.title = "この録音を再生";
+    play.disabled = !entry.audioUrl;
+    play.addEventListener("click", (event) => {
+      event.stopPropagation(); // 本文クリック（結果表示）に伝播させない
+      playRecording(entry);
+    });
+
+    const showResultForEntry = () => {
+      state.lastResult = entry;
+      renderResult(entry);
+      setButtons(false);
+    };
+    row.addEventListener("click", showResultForEntry);
+    row.addEventListener("keydown", (event) => {
+      if (event.target !== row) return; // 再生ボタン自身の Enter / Space は無視
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        showResultForEntry();
+      }
+    });
+
+    row.append(time, preview, play);
+    li.appendChild(row);
+    historyListEl.appendChild(li);
+  });
+}
+
+// -- buttons ---------------------------------------------------------------
+
+startBtn.addEventListener("click", startRecording);
+stopBtn.addEventListener("click", stopRecording);
+
+clearBtn.addEventListener("click", () => {
+  state.lastResult = null;
+  state.history = [];
+  state.lastRecordedUrl = null;
+  revokeAllAudioUrls();
+  renderHistory();
+  resultTextEl.textContent = "ここに認識結果が表示されます。";
+  resultTextEl.classList.add("empty");
+  detailsEl.hidden = true;
+  detailBodyEl.innerHTML = "";
+  clearError();
+  setStatus("待機中");
+  setButtons(false);
+});
+
+copyBtn.addEventListener("click", async () => {
+  if (!state.lastResult) return;
+  try {
+    await navigator.clipboard.writeText(state.lastResult.text);
+    setStatus("結果をコピーしました");
+  } catch (err) {
+    showError("コピーできませんでした: " + (err && err.message ? err.message : err));
+  }
+});
+
+// -- boot ------------------------------------------------------------------
+
+(function boot() {
+  const blocked = preflightMicrophone();
+  if (blocked) {
+    showNotice(blocked);
+    startBtn.disabled = true;
+  }
+  setStatus("待機中");
+  setButtons(false);
+  loadServerInfo();
+})();
+</script>
+</body>
+</html>

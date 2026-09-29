@@ -42,6 +42,45 @@ WHISPER_MODEL=large-v3-turbo uv run python -m server
 - turbo は `alignment_heads`（最大層3）が実デコーダ4層に収まるため、**補正は自動でスキップされる**（起動ログに `no correction needed` と出る）。
 - `large-v3-turbo` は `cpu_threads=8` を付けるとわずかに速い（`WHISPER_CPU_THREADS=8`）。
 
+## 録音 UI（ブラウザから録音 → 即時文字起こし）
+
+```bash
+uv run python -m server
+```
+
+起動後、ブラウザで **<http://127.0.0.1:8000/ui>** を開く（`http://localhost:8000/ui` でも可）。
+
+- 「● 録音開始」→ マイクに向かって話す →「■ 停止して認識」で、停止と同時に
+  `POST /v1/audio/transcriptions`（`verbose_json` + `timestamp_granularities[]=word`, `language=ja`）へ送信する。
+- 認識結果の本文・セグメント・words・音声長・処理時間を表示。結果は「結果をコピー」でクリップボードへ。
+- 履歴は**セッション内のみ**（リロードで消える。`localStorage` は使わない）。
+- ヘッダに `GET /healthz` の結果（モデル名・device・`model_loaded`）を表示する。
+- `WHISPER_API_KEY` を設定している場合は画面の「API キー」欄に入力すると `Authorization: Bearer` で送信する。
+- マイクを許可できない場合・非セキュアコンテキスト（`http://` の外部ホスト等）では案内を表示する。
+  `getUserMedia` は `127.0.0.1` / `localhost` / HTTPS でのみ使える。
+
+実装は `src/whisper_local/server/static/index.html` の1ファイル完結（素の HTML/CSS/JS、ビルド工程なし）。
+`POST` の CORS は全許可（`allow_origins=["*"]`）なので、`file://` や別ポートのページからも叩ける。
+
+### 録音音声の保存
+
+アップロードされた音声は既定で保存される（`var/` は `.gitignore` 済み）。
+
+```
+var/recordings/<YYYY-MM-DD>/<HHMMSS>-<6桁乱数>.<ext>        # 音声本体
+var/recordings/<YYYY-MM-DD>/<HHMMSS>-<6桁乱数>.json         # verbose_json の sidecar
+```
+
+- `ext` は multipart の元ファイル名の拡張子、無ければ `Content-Type` から決定（`webm` / `m4a` / `ogg` / `wav` など、不明なら `bin`）。
+- sidecar JSON には `result`（`verbose_json` 全文）に加え、モデル名・`processing_seconds`・元ファイル名・`audio_url`（`/api/recordings/<date>/<name>`）を入れる。
+- 保存に失敗しても認識結果は 200 のまま返る（警告ログのみ）。
+- `GET /api/recordings/<date>/<name>` で保存音声を取得できる（`WHISPER_API_KEY` 設定時は要 Bearer）。
+
+| env | 既定 | 意味 |
+|---|---|---|
+| `WHISPER_SAVE_AUDIO` | `true` | `false` で保存を無効化 |
+| `WHISPER_SAVE_AUDIO_DIR` | `<repo>/var/recordings` | 保存先ディレクトリ（絶対パス可） |
+
 ## 環境変数
 
 | env | 既定 | 意味 |
@@ -55,6 +94,9 @@ WHISPER_MODEL=large-v3-turbo uv run python -m server
 | `WHISPER_MAX_UPLOAD_MB` | `100` | アップロード上限（超過は 413） |
 | `WHISPER_CPU_THREADS` | `0`(auto) | CTranslate2 の CPU スレッド数 |
 | `WHISPER_VAD_FILTER` | `false` | VAD 前段フィルタを有効化 |
+| `WHISPER_CONDITION_ON_PREVIOUS_TEXT` | `false` | 前セグメント出力を次セグメントの prompt に引き継ぐ（**既定 `false`。`true` は kotoba モデルで長尺が打ち切られる**） |
+| `WHISPER_SAVE_AUDIO` | `true` | アップロード音声の保存（`false` で無効化） |
+| `WHISPER_SAVE_AUDIO_DIR` | `<repo>/var/recordings` | 音声の保存先 |
 
 例:
 
@@ -70,6 +112,8 @@ WHISPER_API_KEY=secret WHISPER_PORT=9000 WHISPER_MAX_UPLOAD_MB=50 uv run python 
 | POST | `/v1/audio/translations` | 英語への翻訳（`task=translate`） |
 | GET | `/v1/models` | OpenAI クライアントの疎通確認用モデル一覧 |
 | GET | `/healthz` | 死活監視（モデルロード状態・device・words 可用性） |
+| GET | `/ui` | 録音 UI（HTML。`/ui/` も 200） |
+| GET | `/api/recordings/<date>/<name>` | 保存済み録音音声の取得 |
 | GET | `/-/healthcheck/` | 起動待ちヘルスチェック（認証不要・常に `{"status":"ok"}`。スラッシュなしも 200） |
 | GET | `/` | 簡易情報（バージョン・対応エンドポイント） |
 
@@ -159,11 +203,27 @@ API 契約テスト（`tests/test_api.py`）はスタブの `ModelManager` を�
 - **GPU 自動検出**: 起動時に CUDA 利用可否を実測する。現環境は `libcuda.so.1` 不在のため **CPU（int8）で動作**し、警告ログが出る。CUDA ユーザースペースを導入して再起動すれば自動で GPU（float16）に乗る。`WHISPER_DEVICE=cuda` を明示指定して CUDA ロードに失敗した場合も、警告を出して CPU にフォールバックする。
 - **alignment_heads 補正**: `kotoba-whisper-v2.0-faster` の配布 `config.json` は `alignment_heads` がデコーダ層 7〜25 を指すが、`model.bin` の実デコーダ層数は 2。CTranslate2 は範囲チェックせず OOB 書き込みし、word timestamps 指定時に **segfault（exit 139）**する。起動時に層数を検出し、範囲外なら最終層の全ヘッドに補正したモデルディレクトリを `<repo>/var/models/<model>/` に生成して読み込む（`model.bin` は symlink、HF キャッシュは変更しない）。補正に失敗した場合は警告を出し、words を無効化した状態で起動継続する（サーバは落とさない）。詳細: `thoughts/word-timestamps-forensics.md`
 - **初回起動**: HF キャッシュにモデルが無い場合はロードできない（`local_files_only` で取得するため、事前にモデルを取得しておくこと）。
+- **長尺音声の打ち切り（既定 `WHISPER_CONDITION_ON_PREVIOUS_TEXT=false` で回避済み）**: faster-whisper の既定 `condition_on_previous_text=True` は、前セグメントの出力トークンを次セグメントの `prompt` に引き継ぐ。kotoba モデル＋長尺入力ではこれが同一トークン列の繰り返しに陥り、Whisper が「これ以上テキストは無い」と判断して**残り時間をスキップして早期終了する**（20 秒台前半で打ち切られる）。このため本サーバは既定を `false` にしている。実測（日本語音声）:
+
+  | 音声長 | `true`（faster-whisper 既定） | `false`（本サーバ既定） |
+  |---|---|---|
+  | 42 秒 | 22.62 / 42.02 秒 = **54%** | 41.06 / 42.02 秒 = **98%** |
+  | 191 秒 | 23.58 / 191.62 秒 = **12%** | 190.66 / 191.62 秒 = **100%** |
+
+  `true` に戻したい場合（多言語モデルで文脈継続を試す等）は `WHISPER_CONDITION_ON_PREVIOUS_TEXT=true` で起動する。デコード・VAD・`word_timestamps`・アップロード上限はいずれも原因ではなく（実測で除外済み）、この設定のみが原因。
 - **認証は既定で無効**: `0.0.0.0` bind のため、LAN 内から誰でも叩ける。必要な場合は `WHISPER_API_KEY` を設定する。
 - **ストリーミング未対応**: `stream=true` は 400 を返す。
 - **`include[]=logprobs` 未対応**: 受け取るが無視する。
 - **`verbose_json` の `words`** は `timestamp_granularities[]=word` 指定時のみ埋まる（未指定なら空配列）。`segments[].seek` は faster-whisper の値をそのまま返す。
 - **CPU 推論速度**: 実測でおおよそ 1.8x realtime（3.29s 音声で推論 ≒6s）。
+- **録音 UI はマイク必須**: ブラウザの `getUserMedia` を使うため、`https` か `127.0.0.1`/`localhost` でしか動作しない。`0.0.0.0` で LAN から IP 直指定で開くと録音できない（UI 側で案内を出す）。
+
+## 入力長の上限
+
+- **サーバ側・モデル側に入力長の制限は無い。** 唯一の上限はアップロードサイズの `WHISPER_MAX_UPLOAD_MB`（既定 100 MB、超過は 413）。
+- opus/webm を 32 kbps で送る場合、100 MB は**約 7 時間相当**。
+- 処理時間（CPU int8）は約 **1.8x realtime**（1 分の音声で推論 ≒40〜60 秒）。律速はアップロード容量と待ち時間で、長尺は分割送信より一括送信の方が速い（191 秒で ≒41 秒）。
+- 長尺で後半が欠落する症状は長さ制限ではなく、上記「既知の制約」の `condition_on_previous_text` が原因（既定 `false` で解決済み）。
 
 ## レイアウト
 
@@ -181,6 +241,7 @@ whisper-local/
 │       ├── app.py                # FastAPI アプリ本体
 │       ├── main.py               # uvicorn 起動
 │       ├── openai_types.py       # OpenAI 互換型・エラー封筒
+│       ├── static/index.html     # 録音 UI（1ファイル完結）
 │       └── format_srt.py         # srt / vtt 整形
 └── tests/test_api.py             # API 契約テスト
 ```

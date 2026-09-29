@@ -100,6 +100,9 @@ class StubManager:
 
 
 def make_client(**kwargs):
+    # Tests opt into recording persistence explicitly so the suite never
+    # writes into the repository's ``var/recordings`` directory.
+    kwargs.setdefault("save_audio", False)
     settings = Settings(api_key=kwargs.pop("api_key", None), **kwargs)
     manager = StubManager()
     app = create_app(settings=settings, manager=manager)
@@ -276,6 +279,181 @@ def test_root_endpoint():
     assert res.json()["name"] == "whisper-local"
 
 
+def test_root_endpoint_advertises_ui():
+    client, _ = make_client()
+    with client:
+        res = client.get("/")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ui"] == "/ui"
+    assert "GET /ui" in body["endpoints"]
+
+
+# -- recording UI (plan section 6) -----------------------------------------
+
+
+def test_ui_endpoint_serves_html():
+    client, _ = make_client()
+    with client:
+        res = client.get("/ui")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/html")
+    assert "<title>whisper-local 録音</title>" in res.text
+    assert "録音開始" in res.text
+    assert "停止して認識" in res.text
+
+
+def test_ui_directory_index_is_not_a_redirect():
+    client, _ = make_client()
+    with client:
+        res = client.get("/ui/", follow_redirects=False)
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/html")
+
+
+def test_ui_is_not_protected_by_auth():
+    client, _ = make_client(api_key="secret")
+    with client:
+        ui = client.get("/ui")
+        api = post_audio(client)
+    assert ui.status_code == 200
+    assert api.status_code == 401
+
+
+def test_recording_is_saved_with_sidecar_by_default(tmp_path):
+    import json
+
+    client, _ = make_client(save_audio=True, save_audio_dir=tmp_path)
+    with client:
+        res = post_audio(client, {"response_format": "verbose_json"})
+    assert res.status_code == 200
+
+    audio_files = sorted(tmp_path.rglob("*.wav"))
+    assert len(audio_files) == 1
+    saved = audio_files[0]
+    assert saved.read_bytes() == AUDIO
+    # <dir>/<YYYY-MM-DD>/<HHMMSS>-<6 digits>.<ext>
+    assert saved.parent.name.count("-") == 2
+    assert saved.stem[-7] == "-"
+    assert saved.stem[-6:].isdigit()
+
+    sidecar = saved.with_suffix(".json")
+    assert sidecar.is_file()
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["model"] == Settings().model
+    assert payload["audio_original_filename"] == "sample.wav"
+    assert payload["audio_content_type"] == "audio/wav"
+    assert payload["audio_bytes"] == len(AUDIO)
+    assert payload["result"]["text"] == "ニュースと天気をミラーに表示して"
+
+
+def test_recording_save_can_be_disabled(tmp_path):
+    client, _ = make_client(save_audio=False, save_audio_dir=tmp_path)
+    with client:
+        res = post_audio(client)
+    assert res.status_code == 200
+    assert list(tmp_path.rglob("*")) == []
+
+
+def test_save_audio_defaults_to_enabled(tmp_path):
+    from whisper_local.config import DEFAULT_SAVE_AUDIO_DIR
+
+    settings = Settings.from_env({})
+    assert settings.save_audio is True
+    assert settings.save_audio_dir == DEFAULT_SAVE_AUDIO_DIR
+
+
+def test_save_audio_env_overrides():
+    settings = Settings.from_env(
+        {"WHISPER_SAVE_AUDIO": "false", "WHISPER_SAVE_AUDIO_DIR": "/tmp/whisper-recordings"}
+    )
+    assert settings.save_audio is False
+    assert str(settings.save_audio_dir) == "/tmp/whisper-recordings"
+
+
+def test_saved_recording_is_downloadable_and_requires_auth(tmp_path):
+    client, _ = make_client(save_audio=True, save_audio_dir=tmp_path)
+    with client:
+        post_audio(client)
+        saved = next(tmp_path.rglob("*.wav"))
+        url = f"/api/recordings/{saved.parent.name}/{saved.name}"
+        res = client.get(url)
+    assert res.status_code == 200
+    assert res.content == AUDIO
+
+    protected, _ = make_client(api_key="secret", save_audio_dir=tmp_path)
+    with protected:
+        denied = protected.get(url)
+        allowed = protected.get(url, headers={"Authorization": "Bearer secret"})
+    assert denied.status_code == 401
+    assert allowed.status_code == 200
+
+
+def test_recording_url_rejects_path_traversal(tmp_path):
+    client, _ = make_client(save_audio_dir=tmp_path)
+    with client:
+        res = client.get("/api/recordings/2026-09-29/..%2F..%2F.env")
+        missing = client.get("/api/recordings/2026-09-29/nope.wav")
+    assert res.status_code == 404
+    assert missing.status_code == 404
+
+
+# -- condition_on_previous_text (long-audio truncation fix) -----------------
+
+
+class RecordingModel:
+    """Stand-in ``WhisperModel`` that records the kwargs passed to ``transcribe``."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict | None = None
+
+    def transcribe(self, samples, **kwargs):
+        self.kwargs = kwargs
+        return [], FakeInfo()
+
+
+def test_condition_on_previous_text_defaults_to_false():
+    assert Settings().condition_on_previous_text is False
+    assert Settings.from_env({}).condition_on_previous_text is False
+
+
+def test_condition_on_previous_text_env_overrides():
+    assert (
+        Settings.from_env({"WHISPER_CONDITION_ON_PREVIOUS_TEXT": "true"}).condition_on_previous_text
+        is True
+    )
+    assert (
+        Settings.from_env({"WHISPER_CONDITION_ON_PREVIOUS_TEXT": "false"}).condition_on_previous_text
+        is False
+    )
+
+
+def test_condition_on_previous_text_is_passed_to_transcribe_by_default():
+    from whisper_local.transcriber import ModelManager
+
+    manager = ModelManager(Settings(save_audio=False))
+    model = RecordingModel()
+    manager._model = model
+
+    manager.transcribe_array([0.0] * 16, language="ja")
+
+    assert model.kwargs is not None
+    assert model.kwargs["condition_on_previous_text"] is False
+
+
+def test_condition_on_previous_text_override_is_passed_to_transcribe():
+    from whisper_local.transcriber import ModelManager
+
+    manager = ModelManager(Settings(save_audio=False, condition_on_previous_text=True))
+    model = RecordingModel()
+    manager._model = model
+
+    manager.transcribe_array([0.0] * 16, language="ja")
+
+    assert model.kwargs is not None
+    assert model.kwargs["condition_on_previous_text"] is True
+
+
 # -- error paths -----------------------------------------------------------
 
 
@@ -385,7 +563,7 @@ def test_undecodable_audio_is_400_with_envelope():
 
 
 def test_words_disabled_degrades_without_error():
-    settings = Settings()
+    settings = Settings(save_audio=False)
     manager = StubManager(words_enabled=False)
     client = TestClient(create_app(settings=settings, manager=manager))
     with client:

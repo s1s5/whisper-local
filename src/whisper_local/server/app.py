@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import mimetypes
 import os
+import shutil
 import tempfile
+import time
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 from typing import Annotated, AsyncIterator, Iterable, Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from whisper_local import __version__, schemas
@@ -27,6 +36,60 @@ log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 1024 * 1024
 MULTIPART_OVERHEAD_ALLOWANCE = 1024 * 1024
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+# Content-Type -> file extension for saved recordings (plan section 5.4).
+_AUDIO_EXTENSIONS = {
+    "audio/webm": "webm",
+    "video/webm": "webm",
+    "audio/ogg": "ogg",
+    "application/ogg": "ogg",
+    "audio/mp4": "m4a",
+    "audio/m4a": "m4a",
+    "audio/x-m4a": "m4a",
+    "video/mp4": "m4a",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/wave": "wav",
+    "audio/flac": "flac",
+    "audio/x-flac": "flac",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+}
+_SAFE_EXTENSION_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def _extension_from_content_type(content_type: Optional[str]) -> str:
+    if content_type:
+        base = content_type.split(";", 1)[0].strip().lower()
+        if base in _AUDIO_EXTENSIONS:
+            return _AUDIO_EXTENSIONS[base]
+    return "bin"
+
+
+def _extension_from_filename(filename: Optional[str]) -> Optional[str]:
+    """Return a sanitized extension (no dot) from the uploaded file name."""
+    if not filename:
+        return None
+    suffix = Path(filename).suffix.lstrip(".").lower()
+    if not suffix or len(suffix) > 8 or not set(suffix) <= _SAFE_EXTENSION_CHARS:
+        return None
+    return suffix
+
+
+def _recording_extension(upload: UploadFile) -> str:
+    return (
+        _extension_from_filename(upload.filename)
+        or _extension_from_content_type(upload.content_type)
+    )
+
+
+def _recording_path(directory: Path, extension: str) -> Path:
+    """<dir>/<YYYY-MM-DD>/<HHMMSS>-<6 digits>.<ext> (plan section 5.4)."""
+    now = datetime.now()
+    stamp = f"{now:%H%M%S}-{uuid.uuid4().int % 1_000_000:06d}"
+    return directory / f"{now:%Y-%m-%d}" / f"{stamp}.{extension}"
 
 
 class ApiError(Exception):
@@ -77,6 +140,16 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
     )
     app.state.settings = settings
     app.state.manager = manager
+
+    # -- CORS (plan section 5.2) -------------------------------------------
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,  # "*" and credentials cannot be combined
+    )
 
     # -- auth --------------------------------------------------------------
 
@@ -221,6 +294,55 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
             return Response(content=schemas.segments_vtt(result), media_type="text/vtt")
         return JSONResponse(content=schemas.to_verbose_json(result))
 
+    def verbose_payload(result) -> dict:
+        """The sidecar JSON body handed to :func:`save_recording`."""
+        return schemas.to_verbose_json(result)
+
+    def save_recording(
+        temp_path: str,
+        upload: UploadFile,
+        *,
+        processing_seconds: float,
+        result,
+    ) -> Optional[str]:
+        """Copy the (already transcribed) upload into ``var/recordings``.
+
+        Returns the browser-facing URL of the saved audio, or ``None`` when
+        saving is disabled or fails. Failures are logged and swallowed: saving
+        must never change the outcome of a transcription (plan section 5.4).
+        """
+        try:
+            directory = Path(settings.save_audio_dir)
+            destination = _recording_path(directory, _recording_extension(upload))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(temp_path, destination)
+            audio_url = f"/api/recordings/{destination.parent.name}/{destination.name}"
+            sidecar = destination.with_suffix(".json")
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "model": settings.model,
+                        "created": int(time.time()),
+                        "processing_seconds": round(processing_seconds, 3),
+                        "audio_url": audio_url,
+                        "audio_original_filename": upload.filename,
+                        "audio_content_type": upload.content_type,
+                        "audio_bytes": destination.stat().st_size,
+                        "result": verbose_payload(result),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            log.info("saved recording: %s -> %s", audio_url, destination)
+            return audio_url
+        except Exception:  # noqa: BLE001 - saving is best effort
+            log.warning(
+                "failed to save recording %s", getattr(upload, "filename", "?"), exc_info=True
+            )
+            return None
+
     async def handle_audio_request(
         request: Request,
         file: UploadFile,
@@ -248,6 +370,7 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
 
         path = await save_upload(file)
         try:
+            started = time.perf_counter()
             try:
                 result = await run_in_threadpool(
                     manager.transcribe,
@@ -276,6 +399,15 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
                     f"Transcription failed: {type(exc).__name__}: {exc}",
                     type="server_error",
                 ) from exc
+            elapsed = time.perf_counter() - started
+            if settings.save_audio:
+                await run_in_threadpool(
+                    save_recording,
+                    path,
+                    file,
+                    processing_seconds=elapsed,
+                    result=result,
+                )
         finally:
             try:
                 os.unlink(path)
@@ -363,7 +495,17 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
             notes=list(manager.load_notes),
         )
 
-    @app.get("/")
+    @app.get("/api/recordings/{date}/{name}", dependencies=[Depends(require_auth)])
+    async def recording(date: str, name: str) -> Response:
+        directory = Path(settings.save_audio_dir)
+        if not _is_safe_recording_part(date) or not _is_safe_recording_part(name):
+            raise ApiError(404, "Recording not found.", type="not_found_error")
+        path = (directory / date / name).resolve()
+        if not path.is_file() or directory.resolve() not in path.parents:
+            raise ApiError(404, "Recording not found.", type="not_found_error")
+        return FileResponse(path, filename=name, content_disposition_type="inline")
+
+    @app.get("/", include_in_schema=False)
     async def root() -> dict:
         return {
             "name": "whisper-local",
@@ -375,7 +517,27 @@ def create_app(settings: Settings | None = None, manager: ModelManager | None = 
                 "POST /v1/audio/translations",
                 "GET /v1/models",
                 "GET /healthz",
+                "GET /ui",
             ],
+            "ui": "/ui",
         }
 
+    # -- UI (static) -------------------------------------------------------
+
+    if STATIC_DIR.is_dir():
+        index = STATIC_DIR / "index.html"
+
+        @app.get("/ui", include_in_schema=False)
+        async def ui_index() -> Response:
+            # Registered before the mount so ``GET /ui`` is 200 instead of
+            # Starlette's 307 redirect to ``/ui/``.
+            return FileResponse(index, media_type="text/html; charset=utf-8")
+
+        app.mount("/ui", StaticFiles(directory=str(STATIC_DIR), html=True), name="ui")
+
     return app
+
+
+def _is_safe_recording_part(part: str) -> bool:
+    """Reject path traversal / nested segments in recording URLs."""
+    return bool(part) and part not in {".", ".."} and "/" not in part and "\\" not in part

@@ -261,6 +261,7 @@ class ModelManager:
                 initial_prompt=initial_prompt,
                 word_timestamps=word_timestamps,
                 vad_filter=vad_filter,
+                condition_on_previous_text=self.settings.condition_on_previous_text,
             )
 
 
