@@ -9,7 +9,7 @@ services:
       UV_PYTHON_INSTALL_DIR: "${HOME}/projects/.cache/python"
       PYTHONUNBUFFERED: "1"
       DEBUG: "True"
-      # WHISPER_MODEL: large-v3-turbo
+      WHISPER_MODEL: large-v3-turbo
       WHISPER_HOST: "0.0.0.0"
     working_dir: ${PWD}
     volumes:
